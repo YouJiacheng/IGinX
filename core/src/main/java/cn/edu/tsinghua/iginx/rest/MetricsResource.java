@@ -36,10 +36,7 @@ import javax.ws.rs.core.Context;
 import javax.ws.rs.core.HttpHeaders;
 import javax.ws.rs.core.Response;
 import javax.ws.rs.core.Response.Status;
-import java.io.BufferedReader;
 import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
@@ -49,7 +46,6 @@ import static cn.edu.tsinghua.iginx.rest.RestUtils.*;
 
 @Path("/")
 public class MetricsResource {
-
     private static final String INSERT_URL = "api/v1/datapoints";
     private static final String INSERT_ANNOTATION_URL = "api/v1/datapoints/annotations";
     private static final String ADD_ANNOTATION_URL = "api/v1/datapoints/annotations/add";
@@ -107,10 +103,9 @@ public class MetricsResource {
 
     @POST
     @Path(ADD_ANNOTATION_URL)
-    public Response addAnnotation(@Context HttpHeaders httpheaders, final InputStream stream, @Suspended final AsyncResponse asyncResponse) {
+    public Response addAnnotation(@Context HttpHeaders httpheaders, String jsonStr, @Suspended final AsyncResponse asyncResponse) {
         try {
-            String str = inputStreamToString(stream);
-            appendAnno(str, httpheaders, asyncResponse);
+            appendAnno(jsonStr, httpheaders, asyncResponse);
         } catch (Exception e) {
             LOGGER.error("Error occurred during execution ", e);
             return setHeaders(Response.status(Status.BAD_REQUEST).entity("Error occurred during execution\n")).build();
@@ -120,10 +115,9 @@ public class MetricsResource {
 
     @POST
     @Path(UPDATE_ANNOTATION_URL)
-    public Response updateAnnotation(@Context HttpHeaders httpheaders, final InputStream stream, @Suspended final AsyncResponse asyncResponse) {
+    public Response updateAnnotation(@Context HttpHeaders httpheaders, String jsonStr, @Suspended final AsyncResponse asyncResponse) {
         try {
-            String str = inputStreamToString(stream);
-            updateAnno(str, httpheaders, asyncResponse);
+            updateAnno(jsonStr, httpheaders, asyncResponse);
         } catch (Exception e) {
             LOGGER.error("Error occurred during execution ", e);
             return setHeaders(Response.status(Status.BAD_REQUEST).entity("Error occurred during execution\n")).build();
@@ -185,23 +179,20 @@ public class MetricsResource {
 
     @POST
     @Path(QUERY_URL)
-    public Response postQuery(final InputStream stream) {
-        try {
-            String str = inputStreamToString(stream);
-            return postQuery(str, false, false, false);
-        } catch (Exception e) {
-            LOGGER.error("Error occurred during execution ", e);
-            return setHeaders(Response.status(Status.BAD_REQUEST).entity("Error occurred during execution\n")).build();
-        }
+    public Response postQuery(String jsonStr) {
+        return postQuery(jsonStr, false, false, false);
     }
-
 
     @POST
     @Path(DELETE_URL)
-    public Response postDelete(final InputStream stream) {
+    public Response postDelete(String jsonStr) {
         try {
-            String str = inputStreamToString(stream);
-            return postDelete(str);
+            QueryParser parser = new QueryParser();
+            Query query = parser.parseQueryMetric(jsonStr);
+            QueryExecutor executor = new QueryExecutor(query);
+            QueryResult result = executor.execute(true);
+            String entity = parser.parseResultToJson(result, true);
+            return setHeaders(Response.status(Status.OK).entity(entity + "\n")).build();
         } catch (Exception e) {
             LOGGER.error("Error occurred during execution ", e);
             return setHeaders(Response.status(Status.BAD_REQUEST).entity("Error occurred during execution\n")).build();
@@ -210,10 +201,40 @@ public class MetricsResource {
 
     @POST
     @Path(DELETE_ANNOTATION_URL)
-    public Response postDeleteAnno(final InputStream stream) {
+    public Response postDeleteAnno(String jsonStr) {
         try {
-            String str = inputStreamToString(stream);
-            return postAnnoDelete(str);
+            //查找出所有符合tagkv的序列路径
+            QueryParser parser = new QueryParser();
+            Query queryBase = parser.parseAnnotationQueryMetric(jsonStr, false);
+            //加入category路径信息
+            Query querySp = parser.addAnnoTags(queryBase);
+            querySp.setStartAbsolute(1L);
+            querySp.setEndAbsolute(TOPTIEM);
+            querySp.setTimePrecision(TimePrecision.NS);
+            QueryExecutor executorPath = new QueryExecutor(querySp);
+            QueryResult resultALL = executorPath.execute(false);
+
+            //修改路径，并重新查询数据，并插入数据
+//            DataPointsParser parserInsert = new DataPointsParser();
+//            querySp.setNullNewAnno();
+//            parserInsert.handleAnnotationUpdate(querySp, resultALL);
+
+            //找到精确路径
+            Query queryAll = parser.getSpecificQuery(resultALL, queryBase);
+            queryAll.setStartAbsolute(1L);
+            queryAll.setEndAbsolute(TOPTIEM);
+            queryAll.setTimePrecision(TimePrecision.NS);
+
+            //空查询判断
+            if(queryAll.getQueryMetrics().isEmpty())
+                return setHeaders(Response.status(Status.OK).entity("\n")).build();
+
+            QueryExecutor executorData = new QueryExecutor(queryAll);
+            //执行删除操作
+            executorData.deleteMetric();
+
+            String entity = parser.parseResultToJson(null, true);
+            return setHeaders(Response.status(Status.OK).entity(entity + "\n")).build();
         } catch (Exception e) {
             LOGGER.error("Error occurred during execution ", e);
             return setHeaders(Response.status(Status.BAD_REQUEST).entity("Error occurred during execution\n")).build();
@@ -240,20 +261,6 @@ public class MetricsResource {
         responseBuilder.header("Cache-Control", "no-cache");
         responseBuilder.header("Expires", 0);
         return (responseBuilder);
-    }
-
-    private static String inputStreamToString(InputStream inputStream) throws Exception {
-        StringBuilder buffer = new StringBuilder();
-        InputStreamReader inputStreamReader = new InputStreamReader(inputStream, StandardCharsets.UTF_8);
-        BufferedReader bufferedReader = new BufferedReader(inputStreamReader);
-        String str;
-        while ((str = bufferedReader.readLine()) != null) {
-            buffer.append(str);
-        }
-        bufferedReader.close();
-        inputStreamReader.close();
-        inputStream.close();
-        return buffer.toString();
     }
 
     private QueryResult normalQuery(Query query) throws Exception {
@@ -389,62 +396,6 @@ public class MetricsResource {
         return ret;
     }
 
-    public Response postAnnoDelete(String jsonStr) {
-        try {
-            //查找出所有符合tagkv的序列路径
-            QueryParser parser = new QueryParser();
-            Query queryBase = parser.parseAnnotationQueryMetric(jsonStr, false);
-            //加入category路径信息
-            Query querySp = parser.addAnnoTags(queryBase);
-            querySp.setStartAbsolute(1L);
-            querySp.setEndAbsolute(TOPTIEM);
-            querySp.setTimePrecision(TimePrecision.NS);
-            QueryExecutor executorPath = new QueryExecutor(querySp);
-            QueryResult resultALL = executorPath.execute(false);
-
-            //修改路径，并重新查询数据，并插入数据
-//            DataPointsParser parserInsert = new DataPointsParser();
-//            querySp.setNullNewAnno();
-//            parserInsert.handleAnnotationUpdate(querySp, resultALL);
-
-            //找到精确路径
-            Query queryAll = parser.getSpecificQuery(resultALL, queryBase);
-            queryAll.setStartAbsolute(1L);
-            queryAll.setEndAbsolute(TOPTIEM);
-            queryAll.setTimePrecision(TimePrecision.NS);
-
-            //空查询判断
-            if(queryAll.getQueryMetrics().isEmpty())
-                return setHeaders(Response.status(Status.OK).entity("\n")).build();
-
-            QueryExecutor executorData = new QueryExecutor(queryAll);
-            //执行删除操作
-            executorData.deleteMetric();
-
-            String entity = parser.parseResultToJson(null, true);
-            return setHeaders(Response.status(Status.OK).entity(entity + "\n")).build();
-        } catch (Exception e) {
-            LOGGER.error("Error occurred during execution ", e);
-            return setHeaders(Response.status(Status.BAD_REQUEST).entity("Error occurred during execution\n")).build();
-        }
-    }
-
-    public Response postDelete(String jsonStr) {
-        try {
-            if (jsonStr == null) {
-                throw new Exception("query json must not be null or empty");
-            }
-            QueryParser parser = new QueryParser();
-            Query query = parser.parseQueryMetric(jsonStr);
-            QueryExecutor executor = new QueryExecutor(query);
-            QueryResult result = executor.execute(true);
-            String entity = parser.parseResultToJson(result, true);
-            return setHeaders(Response.status(Status.OK).entity(entity + "\n")).build();
-        } catch (Exception e) {
-            LOGGER.error("Error occurred during execution ", e);
-            return setHeaders(Response.status(Status.BAD_REQUEST).entity("Error occurred during execution\n")).build();
-        }
-    }
 
     void deleteMetric(String metricName) throws Exception {
         RestSession restSession = new RestSession();
